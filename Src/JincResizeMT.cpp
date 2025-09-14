@@ -395,7 +395,7 @@ Lut::~Lut()
 	mydelete(lut);
 }
 
-bool Lut::InitLut(int lutsize, double radius, double blur)
+bool Lut::InitLut(int lutsize, double radius, double blur, WEIGHTING_TYPE wt)
 {
 	if ((lut == nullptr) || (lutsize > lut_size)) return (false);
 
@@ -405,7 +405,20 @@ bool Lut::InitLut(int lutsize, double radius, double blur)
     for (auto i = 0; i < lutsize; ++i)
     {
         const auto t2 = i / (lutsize - 1.0);
-        lut[i] = sample_sqr(jinc_sqr, radius2 * t2, blur2, radius2) * sample_sqr(jinc_sqr, JINC_ZERO_SQR * t2, 1.0, radius2);
+		if (wt == SP_WT_NONE)
+			lut[i] = sample_sqr(jinc_sqr, radius2 * t2, blur2, radius2);
+		else if (wt == SP_WT_JINC)
+			lut[i] = sample_sqr(jinc_sqr, radius2 * t2, blur2, radius2) * sample_sqr(jinc_sqr, JINC_ZERO_SQR * t2, 1.0, radius2);
+		else if (wt == SP_WT_TRD2)
+		{
+			if (i < (lutsize / 2))
+				lut[i] = sample_sqr(jinc_sqr, radius2 * t2, blur2, radius2);
+			else
+				lut[i] = sample_sqr(jinc_sqr, radius2 * t2, blur2, radius2) * ((2.0 - (2.0 * t2 )));
+		}
+		else
+			return (false);
+		
     }
 
 	return(true);
@@ -1179,7 +1192,7 @@ void JincResizeMT::FreeData(void)
 }
 
 JincResizeMT::JincResizeMT(PClip _child, int target_width, int target_height, double crop_left, double crop_top, double crop_width, double crop_height,
-	int quant_x, int quant_y, int tap, double blur, const char *_cplace, uint8_t _threads, int opt, int initial_capacity, bool initial_capacity_def,
+	int quant_x, int quant_y, int tap, double blur, const char *_cplace, int _weighting_type, bool _bUseLUTkernel, uint8_t _threads, int opt, int initial_capacity, bool initial_capacity_def,
 	double initial_factor, int range, bool _sleep, bool negativePrefetch, IScriptEnvironment* env)
     : GenericVideoFilter(_child), init_lut(nullptr),has_at_least_v8(false), has_at_least_v11(false),
 	avx512(false), avx2(false), sse41(false), subsampled(false), threads (_threads), sleep(_sleep)
@@ -1226,6 +1239,9 @@ JincResizeMT::JincResizeMT(PClip _child, int target_width, int target_height, do
 
     if (blur < 0.0 || blur > 10.0)
         env->ThrowError("JincResizeMT: blur must be between 0.0..10.0.");
+
+	if (_weighting_type < 0 || _weighting_type > 3)
+		env->ThrowError("JincResizeMT: weighting type must be between 0 and 3");
 
 	// Detection of AVX512 doesn't exist on AVS 2.6, so can't be checked.
 	// Just can check at least AVX2, if there is not even AVX2, there is not AVX512.
@@ -1296,6 +1312,12 @@ JincResizeMT::JincResizeMT(PClip _child, int target_width, int target_height, do
 	const double radius = jinc_zeros[tap - 1];
 	const int samples = LUT_SIZE_VALUE;  // should be a multiple of 4
 
+	if (_weighting_type == 0) weighting_type = SP_WT_NONE;
+	if (_weighting_type == 1) weighting_type = SP_WT_JINC;
+	if (_weighting_type == 2) weighting_type = SP_WT_TRD2;
+	
+	bUseLUTkernel = _bUseLUTkernel;
+
 	// AVX512 benchmarks are worse than AVX2, so for now, only allow AVX512 on request.
 #ifdef AVX512_BUILD_POSSIBLE
 	//avx512 = ((!!(env->GetCPUFlags() & CPUF_AVX512F)) && (opt < 0)) || (opt == 3);
@@ -1314,7 +1336,7 @@ JincResizeMT::JincResizeMT(PClip _child, int target_width, int target_height, do
 		FreeData();
 		env->ThrowError("JincResizeMT: Error creating lut.");
 	}
-	if (!init_lut->InitLut(samples, radius, blur))
+	if (!init_lut->InitLut(samples, radius, blur, weighting_type))
 	{
 		FreeData();
 		env->ThrowError("JincResizeMT: Error allocating lut.");
@@ -1896,12 +1918,14 @@ AVSValue __cdecl Create_JincResize(AVSValue args, void* user_data, IScriptEnviro
 		args[9].AsInt(3), // tap
 		args[10].AsFloat(1.0f), // blur
 		args[11].AsString("auto"), // cplace
+		args[12].AsInt(1), // wt (weighting_type)
+		args[13].AsBool(true), // bUseLUTkernel
 		threads_number, // threads
-		args[13].AsInt(-1), // opt
-		args[14].AsInt(0), // initial_capacity
-		args[14].Defined(), // initial_capacity is defined
-		args[15].AsFloat(1.5f), // initial_factor
-		args[16].AsInt(1), // range
+		args[15].AsInt(-1), // opt
+		args[16].AsInt(0), // initial_capacity
+		args[17].Defined(), // initial_capacity is defined
+		args[18].AsFloat(1.5f), // initial_factor
+		args[19].AsInt(1), // range
 		sleep,
 		negativePrefetch,
         env);
@@ -1996,6 +2020,8 @@ AVSValue __cdecl Create_JincResizeTaps(AVSValue args, void* user_data, IScriptEn
 		taps, // tap
 		1.0, // blur
 		args[9].AsString("auto"), // cplace
+		args[12].AsInt(1), // weighting type
+		args[13].AsBool(true), // bUseLUTkernel
 		threads_number, // threads
 		-1, // opt
 		0, // initial_capacity
@@ -2018,19 +2044,19 @@ extern "C" __declspec(dllexport) const char* __stdcall AvisynthPluginInit3(IScri
 	if (!poolInterface->GetThreadPoolInterfaceStatus()) env->ThrowError("JincResizeMT: Error with the TheadPool status!");
 
     env->AddFunction("JincResizeMT", "c[target_width]i[target_height]i[src_left]f[src_top]f[src_width]f[src_height]f[quant_x]i[quant_y]i[tap]i[blur]f" \
-		"[cplace]s[threads]i[opt]i[initial_capacity]i[initial_factor]f" \
+		"[cplace]s[wt]i[lutkernel]b[threads]i[opt]i[initial_capacity]i[initial_factor]f" \
 		"[range]i[logicalCores]b[MaxPhysCore]b[SetAffinity]b[sleep]b[prefetch]i[ThreadLevel]i", Create_JincResize, 0);
 	env->AddFunction("Jinc36ResizeMT", "c[target_width]i[target_height]i[src_left]f[src_top]f[src_width]f[src_height]f[quant_x]i[quant_y]i" \
-		"[cplace]s[threads]i" \
+		"[cplace]s[wt]i[lutkernel]b[threads]i" \
 		"[range]i[logicalCores]b[MaxPhysCore]b[SetAffinity]b[sleep]b[prefetch]i[ThreadLevel]i", Create_JincResizeTaps<3>, 0);
 	env->AddFunction("Jinc64ResizeMT", "c[target_width]i[target_height]i[src_left]f[src_top]f[src_width]f[src_height]f[quant_x]i[quant_y]i" \
-		"[cplace]s[threads]i" \
+		"[cplace]s[wt]i[lutkernel]b[threads]i" \
 		"[range]i[logicalCores]b[MaxPhysCore]b[SetAffinity]b[sleep]b[prefetch]i[ThreadLevel]i", Create_JincResizeTaps<4>, 0);
 	env->AddFunction("Jinc144ResizeMT", "c[target_width]i[target_height]i[src_left]f[src_top]f[src_width]f[src_height]f[quant_x]i[quant_y]i" \
-		"[cplace]s[threads]i" \
+		"[cplace]s[wt]i[lutkernel]b[threads]i" \
 		"[range]i[logicalCores]b[MaxPhysCore]b[SetAffinity]b[sleep]b[prefetch]i[ThreadLevel]i", Create_JincResizeTaps<6>, 0);
 	env->AddFunction("Jinc256ResizeMT", "c[target_width]i[target_height]i[src_left]f[src_top]f[src_width]f[src_height]f[quant_x]i[quant_y]i" \
-		"[cplace]s[threads]i" \
+		"[cplace]s[wt]i[lutkernel]b[threads]i" \
 		"[range]i[logicalCores]b[MaxPhysCore]b[SetAffinity]b[sleep]b[prefetch]i[ThreadLevel]i", Create_JincResizeTaps<8>, 0);
 
     return JINCRESIZEMT_VERSION;
