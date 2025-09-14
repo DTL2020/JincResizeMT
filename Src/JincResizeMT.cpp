@@ -190,6 +190,8 @@ static double jinc_zeros[16] =
     16.247661874700962
 };
 
+double JINC_ZERO_SQR = jinc_zeros[0] * jinc_zeros[0];
+
 //  Modified from boost package math/tools/`rational.hpp`
 //
 //  (C) Copyright John Maddock 2006.
@@ -383,7 +385,6 @@ static double sample_sqr(double (*filter)(double), double x2, double blur2, doub
     return 0.0;
 }
 
-double JINC_ZERO_SQR = 1.48759464366204680005356;
 
 Lut::Lut() : lut_size(LUT_SIZE_VALUE)
 {
@@ -429,6 +430,29 @@ float Lut::GetFactor(int index)
     if ((index >= lut_size) || (lut == nullptr))
         return 0.0f;
     return static_cast<float>(lut[index]);
+}
+
+double GetFactor2D(double dx, double dy, double radius, double blur, WEIGHTING_TYPE wt)
+{
+	const auto arg2 = dx*dx + dy*dy;
+	auto arg = sqrt(arg2);
+	if (arg > radius) arg = radius; // limit for safety ?
+	const auto blur2 = blur * blur;
+	const auto radius2 = radius * radius;
+
+	if (wt == SP_WT_NONE)
+		return sample_sqr(jinc_sqr, arg2, blur2, radius2);
+	else if (wt == SP_WT_JINC)
+		return sample_sqr(jinc_sqr, arg2, blur2, radius2) * sample_sqr(jinc_sqr, JINC_ZERO_SQR * (arg2 / radius2), 1.0, radius2);
+	else if (wt == SP_WT_TRD2)
+	{
+		if (arg < (radius / 2)) 
+			return sample_sqr(jinc_sqr, arg2, blur2, radius2);
+		else
+			return sample_sqr(jinc_sqr, arg2, blur2, radius2) * ((2.0 - (2.0 * (arg/radius)))); 
+	}
+
+	return 0; 
 }
 
 //static const double DOUBLE_ROUND_MAGIC_NUMBER = 6755399441055744.0;
@@ -487,6 +511,9 @@ struct generate_coeff_params
     int initial_capacity;
     double initial_factor;
 	int mod_align;
+	bool bUseLUTkernel;
+	double blur;
+	WEIGHTING_TYPE weighting_type;
 };
 
 #ifndef C17_ENABLE
@@ -647,10 +674,17 @@ static bool generate_coeff_table_c(const generate_coeff_params &params)
                         const double dx = (clamp(is_border ? xpos : quantized_xpos, 0.f, static_cast<float>(src_width - 1)) - window_x) * filter_step_x;
                         const double dy = (clamp(is_border ? ypos : quantized_ypos, 0.f, static_cast<float>(src_height - 1)) - window_y) * filter_step_y;
 
-                        //int index = static_cast<int>(llround((samples - 1) * (dx * dx + dy * dy) / radius2 + DOUBLE_ROUND_MAGIC_NUMBER));
-						int index = static_cast<int>(llround((samples - 1) * (dx * dx + dy * dy) / radius2));
+						float factor;
 
-                        const float factor = func->GetFactor(index);
+						if (params.bUseLUTkernel)
+						{
+							//int index = static_cast<int>(llround((samples - 1) * (dx * dx + dy * dy) / radius2 + DOUBLE_ROUND_MAGIC_NUMBER));
+							int index = static_cast<int>(llround((samples - 1) * (dx * dx + dy * dy) / radius2));
+
+							factor = func->GetFactor(index);
+						}
+						else
+							factor = (float)GetFactor2D(dx, dy, radius, params.blur, params.weighting_type);
 
                         tmp_array[curr_factor_ptr + static_cast<int64_t>(lx)] = factor;
                         divider += factor;
@@ -1330,16 +1364,19 @@ JincResizeMT::JincResizeMT(PClip _child, int target_width, int target_height, do
 
 	const int mod_align = (avx512) ? 16 : (avx2) ? 8 : (sse41) ? 4 : 0;
 
-	init_lut = new Lut();
-	if (init_lut == nullptr)
+	if (bUseLUTkernel)
 	{
-		FreeData();
-		env->ThrowError("JincResizeMT: Error creating lut.");
-	}
-	if (!init_lut->InitLut(samples, radius, blur, weighting_type))
-	{
-		FreeData();
-		env->ThrowError("JincResizeMT: Error allocating lut.");
+		init_lut = new Lut();
+		if (init_lut == nullptr)
+		{
+			FreeData();
+			env->ThrowError("JincResizeMT: Error creating lut.");
+		}
+		if (!init_lut->InitLut(samples, radius, blur, weighting_type))
+		{
+			FreeData();
+			env->ThrowError("JincResizeMT: Error allocating lut.");
+		}
 	}
 
     out.emplace_back(new EWAPixelCoeff());
@@ -1361,7 +1398,10 @@ JincResizeMT::JincResizeMT(PClip _child, int target_width, int target_height, do
         crop_height,
         initial_capacity,
         initial_factor,
-		mod_align
+		mod_align,
+		bUseLUTkernel,
+		blur,
+		weighting_type
     };
 
 	if (!generate_coeff_table_c(params))
