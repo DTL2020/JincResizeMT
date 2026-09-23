@@ -468,11 +468,11 @@ inline static double sinc_pi(double value)
 	}
 }
 
-static double sample_hexsinc(double dx, double dy, double W)
+static double sample_hexsinc(double dx, double dy, double Wx, double Wy)
 {
 	const double rcp_sqrt3 = 1 / sqrt(3.0);
 
-	return (sinc_pi(2 * W * rcp_sqrt3 * dx) * sinc_pi(W * rcp_sqrt3 * dx + W * dy) + sinc_pi(W * rcp_sqrt3 * dx - W * dy) * sinc_pi(2 * W * rcp_sqrt3 * dx) + sinc_pi(W * rcp_sqrt3 * dx + W * dy) * sinc_pi(W * rcp_sqrt3 * dx - W * dy)) / 3;
+	return (sinc_pi(2 * Wx * rcp_sqrt3 * dx) * sinc_pi(Wx * rcp_sqrt3 * dx + Wy * dy) + sinc_pi(Wx * rcp_sqrt3 * dx - Wy * dy) * sinc_pi(2 * Wx * rcp_sqrt3 * dx) + sinc_pi(Wx * rcp_sqrt3 * dx + Wy * dy) * sinc_pi(Wx * rcp_sqrt3 * dx - Wy * dy)) / 3;
 }
 
 static double GetFactor2D(double dx, double dy, double radius, double blur, WEIGHTING_TYPE wt)
@@ -499,14 +499,11 @@ static double GetFactor2D(double dx, double dy, double radius, double blur, WEIG
 			else
 				return(sample_sqr(jinc_sqr,arg2,blur2,radius2)*((2.0-(2.0*(arg/radius))))); 
 			break;
-		case SP_WT_HEXSINC:
-			return(sample_sqr(jinc_sqr, arg2, blur2, radius2)*sample_hexsinc(dx, dy, arg2 / radius2)); // not finished
-			break;
 		default : return(0.0); break;
 	}
 }
 
-static double GetFactorHexSinc2D(double dx, double dy, double radius, double blur, WEIGHTING_TYPE wt)
+static double GetFactorHexSinc2D(double dx, double dy, double radius, double blurH, double blurV, WEIGHTING_TYPE wt)
 {
 	const double arg2 = dx * dx + dy * dy;
 	double arg = sqrt(arg2);
@@ -520,19 +517,19 @@ static double GetFactorHexSinc2D(double dx, double dy, double radius, double blu
 	switch (wt)
 	{
 		case SP_WT_NONE:
-			return(sample_hexsinc(dx, dy, 1.0));
+			return(sample_hexsinc(dx, dy, blurH, blurV));
 			break;
 		case SP_WT_JINC:
-			return(sample_hexsinc(dx, dy, 1.0) * sample_sqr(jinc_sqr, JINC_ZERO_SQR * (arg2 / radius2), 1.0, radius2));
+			return(sample_hexsinc(dx, dy, blurH, blurV) * sample_sqr(jinc_sqr, JINC_ZERO_SQR * (arg2 / radius2), 1.0, radius2));
 			break;
 		case SP_WT_TRD2:
 			if (arg < (radius / 2))
-				return(sample_hexsinc(dx, dy, 1.0));
+				return(sample_hexsinc(dx, dy, blurH, blurV));
 			else
-				return(sample_hexsinc(dx, dy, 1.0) * ((2.0 - (2.0 * (arg / radius)))));
+				return(sample_hexsinc(dx, dy, blurH, blurV) * ((2.0 - (2.0 * (arg / radius)))));
 			break;
 		case SP_WT_HEXSINC:
-			return(sample_hexsinc(dx, dy, 1.0) * sample_hexsinc(dx*rcp_arg, dy*rcp_arg, 1.0)); // not finished
+			return(sample_hexsinc(dx, dy, blurH, blurV) * sample_hexsinc(dx*rcp_arg, dy*rcp_arg, blurH, blurV)); // not finished
 			break;
 		default: return(0.0); break;
 	}
@@ -669,6 +666,8 @@ static bool generate_coeff_table_c(const JincMT_generate_coeff_params &params)
 	const float k11 = params.k11;
 	const float k21 = params.k21;
 	SP_KERNEL_TYPE kernel_type = params.kernel_type;
+	const double lattice_scaleV = (params.lattice_in == LATTICE_CARTESIAN) ? sqrt(3) / 2 : 1.0;
+	const double lattice_scaleH = (params.lattice_in == LATTICE_CARTESIAN) ? sqrt(3) / 2 : 1.0;
 
     const double filter_step_x = min(static_cast<double>(dst_width) / params.crop_width, 1.0);
     const double filter_step_y = min(static_cast<double>(dst_height) / params.crop_height, 1.0);
@@ -826,7 +825,7 @@ static bool generate_coeff_table_c(const JincMT_generate_coeff_params &params)
 								factor = (float)GetFactor2D_JINCSUM_21(dx,dy,k10,k20,k11,k21,radius2);
 								break;
 							case SP_HEXSINC:
-								factor = (float)GetFactorHexSinc2D(dx,dy,radius,params.blur,params.weighting_type);
+								factor = (float)GetFactorHexSinc2D(dx,dy,radius,params.blurH*lattice_scaleH, params.blurV*lattice_scaleV,params.weighting_type);
 								break;
 							default : factor = 0.0; break;
 						}
@@ -1433,7 +1432,7 @@ void JincResizeMT::FreeData(void)
 }
 
 JincResizeMT::JincResizeMT(PClip _child, int target_width, int target_height, double crop_left, double crop_top, double crop_width, double crop_height,
-	int quant_x, int quant_y, int tap, double blur, const char *_cplace, uint8_t _threads, int opt, int initial_capacity, bool initial_capacity_def,
+	int quant_x, int quant_y, int tap, double blur, double blurH, double blurV, const char *_cplace, uint8_t _threads, int opt, int initial_capacity, bool initial_capacity_def,
 	double initial_factor, int _weighting_type, bool _bUseLUTkernel, SP_KERNEL_TYPE _sp_kernel_type,
 	float _k10, float _k20, float _k11, float _k21, float _support, bool _bUseFP16coeff,
 	int range, bool _sleep, bool negativePrefetch, LATTICE_TYPE in_lt, LATTICE_TYPE out_lt, IScriptEnvironment* env)
@@ -1654,8 +1653,12 @@ JincResizeMT::JincResizeMT(PClip _child, int target_width, int target_height, do
 		mod_align,
 		bUseLUTkernel,
 		blur,
+		blurH,
+		blurV,
 		weighting_type,
 		kernel_type,
+		in_lattice_type,
+		out_lattice_type,
 		k10,
 		k20,
 		k11,
@@ -1725,8 +1728,12 @@ JincResizeMT::JincResizeMT(PClip _child, int target_width, int target_height, do
 			mod_align,
 			bUseLUTkernel,
 			blur,
+			blurH,
+			blurV,
 			weighting_type,
 			kernel_type,
+			in_lattice_type,
+			out_lattice_type,
 			k10,
 			k20,
 			k11,
@@ -2367,6 +2374,8 @@ AVSValue __cdecl Create_JincResize(AVSValue args, void* user_data, IScriptEnviro
 		args[8].AsInt(256), // quant_y
 		args[9].AsInt(3), // tap
 		args[10].AsFloat(1.0f), // blur
+		1.0f, // blurH
+		1.0f, // blurV
 		args[11].AsString("auto"), // cplace
 		threads_number, // threads
 		args[13].AsInt(-1), // opt
@@ -2478,6 +2487,8 @@ AVSValue __cdecl Create_JincResizeTaps(AVSValue args, void* user_data, IScriptEn
 		args[8].AsInt(256), // quant_y
 		taps, // tap
 		1.0, // blur
+		1.0f,// blurH
+		1.0f,// blurV
 		args[9].AsString("auto"), // cplace
 		threads_number, // threads
 		-1, // opt
@@ -2599,6 +2610,8 @@ AVSValue __cdecl Create_UserDefined4(AVSValue args, void* user_data, IScriptEnvi
 		args[8].AsInt(256), // quant_y
 		1, // tap - not used
 		1.0, // blur
+		1.0f,// blurH
+		1.0f,// blurV
 		args[9].AsString("auto"), // cplace
 		threads_number, // threads
 		args[11].AsInt(-1), // opt
@@ -2712,6 +2725,8 @@ AVSValue __cdecl Create_HexSincResize(AVSValue args, void* user_data, IScriptEnv
 		args[8].AsInt(256), // quant_y
 		args[9].AsInt(3), // tap
 		args[10].AsFloat(1.0f), // blur
+		1.0f,//blurH
+		1.0f,//blurV
 		args[11].AsString("auto"), // cplace
 		threads_number, // threads
 		args[13].AsInt(-1), // opt

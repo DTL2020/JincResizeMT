@@ -156,8 +156,12 @@ typedef struct _JincMT_generate_coeff_params
 	int mod_align;
 	bool bUseLUTkernel;
 	double blur;
+	double blurH;
+	double blurV;
 	WEIGHTING_TYPE weighting_type;
 	SP_KERNEL_TYPE kernel_type;
+	LATTICE_TYPE lattice_in;
+	LATTICE_TYPE lattice_out;
 	float k10;
 	float k20;
 	float k11;
@@ -215,7 +219,7 @@ class JincResizeMT : public GenericVideoFilter
 
 public:
 	JincResizeMT(PClip _child, int target_width, int target_height, double crop_left, double crop_top, double crop_width, double crop_height,
-		int quant_x, int quant_y, int tap, double blur, const char *_cplace, uint8_t _threads, int opt, int initial_capacity, bool initial_capacity_def, double initial_factor, int _weighting_type, bool _bUseLUTkernel,
+		int quant_x, int quant_y, int tap, double blur, double blurH, double blurV, const char *_cplace, uint8_t _threads, int opt, int initial_capacity, bool initial_capacity_def, double initial_factor, int _weighting_type, bool _bUseLUTkernel,
 		SP_KERNEL_TYPE _sp_kernel_type, float _k10, float _k20, float _k11, float _k21, float _support, bool _bUseFP16coeff,
 		int range, bool _sleep, bool negativePrefetch, LATTICE_TYPE in_lt, LATTICE_TYPE out_lt, IScriptEnvironment* env);
     PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment *env);
