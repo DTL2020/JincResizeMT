@@ -72,13 +72,22 @@ typedef enum _WEIGHTING_TYPE
 	SP_WT_NONE, // no weighting, pure (jinc) kernel, like SincResize for 1D
 	SP_WT_JINC, // Jinc first lobe to first zero weighting, initial for JincResize AVS plugin (aka EWA_Lanczos), like LanczosResize for 1D (weighting by first lobe of the base kernel function)
 	SP_WT_TRD2, // Trapecoidal weigthing with linear fade to zero at the second half of filter size, like in SincLin2Resize, expected a bit sharper of 1 and still not having edge issues of 0
+	SP_WT_HEXSINC, // Hex Sinc first lobe (same as in Lanczos for Cartesian separable resize)
 } WEIGHTING_TYPE;
 
 typedef enum _SP_KERNEL_TYPE
 {
 	SP_JINCSINGLE, // single jinc kernel somehow optionally weighted (for upsample)
 	SP_JINCSUM, // weighted sum of jincs in 2D space (for downsample)
+	SP_HEXSINC, // single hex sinc kernel somehow optionally weighted (for upsample)
+	SP_HEXSINCSUM, // weighted sum of hex sincs in 2D space (for downsample)
 } SP_KERNEL_TYPE;
+
+typedef enum _LATTICE_TYPE
+{
+	LATTICE_CARTESIAN,
+	LATTICE_HEXAGONAL,
+} LATTICE_TYPE;
 
 typedef struct _MT_Data_Info_JincResizeMT
 {
@@ -185,6 +194,9 @@ class JincResizeMT : public GenericVideoFilter
 
 	bool bUseFP16coeff;
 
+	LATTICE_TYPE in_lattice_type;
+	LATTICE_TYPE out_lattice_type;
+
 	JincResizeMT_Process process_frame_1x, process_frame_2x, process_frame_3x, process_frame_4x;
 
 	Public_MT_Data_Thread MT_Thread[MAX_MT_THREADS];
@@ -205,7 +217,7 @@ public:
 	JincResizeMT(PClip _child, int target_width, int target_height, double crop_left, double crop_top, double crop_width, double crop_height,
 		int quant_x, int quant_y, int tap, double blur, const char *_cplace, uint8_t _threads, int opt, int initial_capacity, bool initial_capacity_def, double initial_factor, int _weighting_type, bool _bUseLUTkernel,
 		SP_KERNEL_TYPE _sp_kernel_type, float _k10, float _k20, float _k11, float _k21, float _support, bool _bUseFP16coeff,
-		int range, bool _sleep, bool negativePrefetch,IScriptEnvironment* env);
+		int range, bool _sleep, bool negativePrefetch, LATTICE_TYPE in_lt, LATTICE_TYPE out_lt, IScriptEnvironment* env);
     PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment *env);
     virtual ~JincResizeMT();
 	int __stdcall SetCacheHints(int cachehints, int frame_range);

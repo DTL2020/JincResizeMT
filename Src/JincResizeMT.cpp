@@ -60,6 +60,14 @@
 #include "resize_plane_avx512.h"
 #endif
 
+#define EPS_SINC_PI 1e-6
+#define EPS_JINC_PI 1e-6
+
+#ifndef M_PI // GCC seems to have it
+static const double M_PI = 3.14159265358979323846;
+#endif
+
+
 #define myfree(ptr) if (ptr!=nullptr) { free(ptr); ptr=nullptr;}
 #define myalignedfree(ptr) if (ptr!=nullptr) { _aligned_free(ptr); ptr=nullptr;}
 #define mydeleteT(ptr) if (ptr!=nullptr) { delete[] ptr; ptr=nullptr;}
@@ -131,13 +139,6 @@ static AVS_FORCEINLINE unsigned portable_clz(size_t x)
     unsigned long index;
     return (_BitScanReverse(&index, static_cast<unsigned long>(x))) ? (31 - index) : 32;
 }
-
-
-#define EPS_JINC_PI 1e-6
-
-#ifndef M_PI // GCC seems to have it
-static const double M_PI = 3.14159265358979323846;
-#endif
 
 // Taylor series coefficients of 2*BesselJ1(pi*x)/(pi*x) as (x^2) -> 0
 static const double jinc_taylor_series[31] =
@@ -450,6 +451,29 @@ float JincMT_Lut::GetFactor(int index)
     return static_cast<float>(lut[index]);
 }
 
+inline static double sinc_pi(double value)
+{
+	value *= M_PI;
+
+	if (fabs(value) > EPS_SINC_PI)
+	{
+		return(sin(value) / value);
+	}
+	else
+	{
+		const double a = -1.0 / 6.0, b = 1.0 / 120.0;
+		value *= value;
+
+		return((value * b + a) * value + 1.0);
+	}
+}
+
+static double sample_hexsinc(double dx, double dy, double W)
+{
+	const double rcp_sqrt3 = 1 / sqrt(3.0);
+
+	return (sinc_pi(2 * W * rcp_sqrt3 * dx) * sinc_pi(W * rcp_sqrt3 * dx + W * dy) + sinc_pi(W * rcp_sqrt3 * dx - W * dy) * sinc_pi(2 * W * rcp_sqrt3 * dx) + sinc_pi(W * rcp_sqrt3 * dx + W * dy) * sinc_pi(W * rcp_sqrt3 * dx - W * dy)) / 3;
+}
 
 static double GetFactor2D(double dx, double dy, double radius, double blur, WEIGHTING_TYPE wt)
 {
@@ -475,10 +499,44 @@ static double GetFactor2D(double dx, double dy, double radius, double blur, WEIG
 			else
 				return(sample_sqr(jinc_sqr,arg2,blur2,radius2)*((2.0-(2.0*(arg/radius))))); 
 			break;
+		case SP_WT_HEXSINC:
+			return(sample_sqr(jinc_sqr, arg2, blur2, radius2)*sample_hexsinc(dx, dy, arg2 / radius2)); // not finished
+			break;
 		default : return(0.0); break;
 	}
 }
 
+static double GetFactorHexSinc2D(double dx, double dy, double radius, double blur, WEIGHTING_TYPE wt)
+{
+	const double arg2 = dx * dx + dy * dy;
+	double arg = sqrt(arg2);
+
+	if (arg > radius) arg = radius; // limit for safety ? are we need it for hex sinc ?
+
+	const double radius2 = radius * radius;
+	
+	const double rcp_arg = arg2 / radius2;
+
+	switch (wt)
+	{
+		case SP_WT_NONE:
+			return(sample_hexsinc(dx, dy, 1.0));
+			break;
+		case SP_WT_JINC:
+			return(sample_hexsinc(dx, dy, 1.0) * sample_sqr(jinc_sqr, JINC_ZERO_SQR * (arg2 / radius2), 1.0, radius2));
+			break;
+		case SP_WT_TRD2:
+			if (arg < (radius / 2))
+				return(sample_hexsinc(dx, dy, 1.0));
+			else
+				return(sample_hexsinc(dx, dy, 1.0) * ((2.0 - (2.0 * (arg / radius)))));
+			break;
+		case SP_WT_HEXSINC:
+			return(sample_hexsinc(dx, dy, 1.0) * sample_hexsinc(dx*rcp_arg, dy*rcp_arg, 1.0)); // not finished
+			break;
+		default: return(0.0); break;
+	}
+}
 
 // Here is our simple jinc_pi(x), not 2.0x because of auto-normalizing of kernel for convolution in resampling program generator, but M_PI scaled argument
 inline static double jinc_pi(double arg)
@@ -766,6 +824,9 @@ static bool generate_coeff_table_c(const JincMT_generate_coeff_params &params)
 								break;
 							case SP_JINCSUM :
 								factor = (float)GetFactor2D_JINCSUM_21(dx,dy,k10,k20,k11,k21,radius2);
+								break;
+							case SP_HEXSINC:
+								factor = (float)GetFactorHexSinc2D(dx,dy,radius,params.blur,params.weighting_type);
 								break;
 							default : factor = 0.0; break;
 						}
@@ -1375,11 +1436,11 @@ JincResizeMT::JincResizeMT(PClip _child, int target_width, int target_height, do
 	int quant_x, int quant_y, int tap, double blur, const char *_cplace, uint8_t _threads, int opt, int initial_capacity, bool initial_capacity_def,
 	double initial_factor, int _weighting_type, bool _bUseLUTkernel, SP_KERNEL_TYPE _sp_kernel_type,
 	float _k10, float _k20, float _k11, float _k21, float _support, bool _bUseFP16coeff,
-	int range, bool _sleep, bool negativePrefetch, IScriptEnvironment* env)
+	int range, bool _sleep, bool negativePrefetch, LATTICE_TYPE in_lt, LATTICE_TYPE out_lt, IScriptEnvironment* env)
     : GenericVideoFilter(_child), init_lut(nullptr),has_at_least_v8(false), has_at_least_v11(false),
 	avx512(false), avx2(false), sse41(false), avx512_d(false), subsampled(false), threads (_threads), sleep(_sleep),
 	bUseLUTkernel(_bUseLUTkernel),kernel_type(_sp_kernel_type), k10(_k10), k20(_k20), k11(_k11), k21(_k21),
-	support(_support), bUseFP16coeff(false)
+	support(_support), bUseFP16coeff(false), in_lattice_type(in_lt), out_lattice_type(out_lt)
 {
 	UserId = 0;
 
@@ -1428,8 +1489,8 @@ JincResizeMT::JincResizeMT(PClip _child, int target_width, int target_height, do
     if ((blur < 0.0) || (blur > 10.0))
         env->ThrowError("JincResizeMT: blur must be between 0.0..10.0.");
 	
-	if ((_weighting_type < 0) || (_weighting_type > 2))
-		env->ThrowError("JincResizeMT: weighting type must be between 0 and 2");
+	if ((_weighting_type < 0) || (_weighting_type > 3))
+		env->ThrowError("JincResizeMT: weighting type must be between 0 and 3");
 
 	// Detection of AVX512, AVX2 or FP16 doesn't exist on AVS 2.6, so can't be checked.
 	// Just can check at least AVX, if there is not even AVX, there is not AVX512 or AVX2 or FP16.
@@ -1513,6 +1574,9 @@ JincResizeMT::JincResizeMT(PClip _child, int target_width, int target_height, do
 		case SP_JINCSUM :
 			radius = support;
 			break;
+		case SP_HEXSINC:
+			radius = tap; // need radius recalculation for weighting of WT_JINC
+			break;
 		default : radius = 1.0; break; // some non-zero value
 	}
 		
@@ -1524,6 +1588,7 @@ JincResizeMT::JincResizeMT(PClip _child, int target_width, int target_height, do
 		case 0 : weighting_type = SP_WT_NONE; break;
 		case 1 : weighting_type = SP_WT_JINC; break;
 		case 2 : weighting_type = SP_WT_TRD2; break;
+		case 3:  weighting_type = SP_WT_HEXSINC; break;
 		default : weighting_type = SP_WT_NONE; break;
 	}
 
@@ -2214,15 +2279,15 @@ PVideoFrame __stdcall JincResizeMT::GetFrame(int n, IScriptEnvironment* env)
 
 AVSValue __cdecl Create_JincResize(AVSValue args, void* user_data, IScriptEnvironment* env)
 {
-    const VideoInfo& vi = args[0].AsClip()->GetVideoInfo();
+	const VideoInfo& vi = args[0].AsClip()->GetVideoInfo();
 
 	const int threads = args[12].AsInt(0);
-	const bool LogicalCores = args[20].AsBool(true);
-	const bool MaxPhysCores = args[21].AsBool(true);
-	const bool SetAffinity = args[22].AsBool(false);
-	const bool sleep = args[23].AsBool(false);
-	int prefetch = args[24].AsInt(0);
-	int thread_level = args[25].AsInt(6);
+	const bool LogicalCores = args[22].AsBool(true);
+	const bool MaxPhysCores = args[23].AsBool(true);
+	const bool SetAffinity = args[24].AsBool(false);
+	const bool sleep = args[25].AsBool(false);
+	int prefetch = args[26].AsInt(0);
+	int thread_level = args[27].AsInt(6);
 
 	const bool negativePrefetch = (prefetch < 0) ? true : false;
 	prefetch = abs(prefetch);
@@ -2287,6 +2352,9 @@ AVSValue __cdecl Create_JincResize(AVSValue args, void* user_data, IScriptEnviro
 		}
 	}
 
+	const LATTICE_TYPE in_lt = args[19].AsInt(0) == 0 ? LATTICE_CARTESIAN : LATTICE_HEXAGONAL;
+	const LATTICE_TYPE out_lt = args[20].AsInt(0) == 0 ? LATTICE_CARTESIAN : LATTICE_HEXAGONAL;
+
 	return new JincResizeMT(
 		args[0].AsClip(),
 		args[1].AsInt(),  // target_width
@@ -2307,17 +2375,19 @@ AVSValue __cdecl Create_JincResize(AVSValue args, void* user_data, IScriptEnviro
 		args[15].AsFloat(1.5f), // initial_factor
 		args[16].AsInt(1), // wt
 		args[17].AsBool(true), // lutkernel
-		SP_JINCSINGLE,
+		SP_JINCSINGLE, // kernel_type  TODO: make Create_JincResize() and Create_HexSincResize() as single function with additional arguments ?
 		0.0f,
 		0.0f,
 		0.0f,
 		0.0f,
 		0.0f,
 		args[18].AsBool(false), // FP16
-		args[19].AsInt(1), // range
+		args[21].AsInt(1), // range
 		sleep,
 		negativePrefetch,
-        env);
+		in_lt,
+		out_lt,
+		env);
 }
 
 template <int taps>
@@ -2426,6 +2496,8 @@ AVSValue __cdecl Create_JincResizeTaps(AVSValue args, void* user_data, IScriptEn
 		args[13].AsInt(1), // range
 		sleep,
 		negativePrefetch,
+		LATTICE_CARTESIAN,
+		LATTICE_CARTESIAN,
 		env);
 }
 
@@ -2545,8 +2617,124 @@ AVSValue __cdecl Create_UserDefined4(AVSValue args, void* user_data, IScriptEnvi
 		args[18].AsInt(1), // range
 		sleep,
 		negativePrefetch,
+		LATTICE_CARTESIAN,
+		LATTICE_CARTESIAN,
 		env);
 }
+
+AVSValue __cdecl Create_HexSincResize(AVSValue args, void* user_data, IScriptEnvironment* env)
+{
+	const VideoInfo& vi = args[0].AsClip()->GetVideoInfo();
+
+	const int threads = args[12].AsInt(0);
+	const bool LogicalCores = args[22].AsBool(true);
+	const bool MaxPhysCores = args[23].AsBool(true);
+	const bool SetAffinity = args[24].AsBool(false);
+	const bool sleep = args[25].AsBool(false);
+	int prefetch = args[26].AsInt(0);
+	int thread_level = args[27].AsInt(6);
+
+	const bool negativePrefetch = (prefetch < 0) ? true : false;
+	prefetch = abs(prefetch);
+
+	if ((threads < 0) || (threads > MAX_MT_THREADS))
+		env->ThrowError("JincResizeMT: [threads] must be between 0 and %ld.", MAX_MT_THREADS);
+	if (prefetch == 0) prefetch = 1;
+	if (prefetch > MAX_THREAD_POOL)
+		env->ThrowError("JincResizeMT: [prefetch] can't be higher than %d.", MAX_THREAD_POOL);
+	if ((thread_level < 1) || (thread_level > 7))
+		env->ThrowError("JincResizeMT: [ThreadLevel] must be between 1 and 7.");
+
+	uint8_t threads_number = 1;
+
+	if (threads != 1)
+	{
+		const ThreadLevelName TabLevel[8] = { NoneThreadLevel,IdleThreadLevel,LowestThreadLevel,
+			BelowThreadLevel,NormalThreadLevel,AboveThreadLevel,HighestThreadLevel,CriticalThreadLevel };
+
+		if (!poolInterface->CreatePool(prefetch)) env->ThrowError("JincResizeMT: Unable to create ThreadPool!");
+
+		threads_number = poolInterface->GetThreadNumber(threads, LogicalCores);
+
+		if (threads_number == 0) env->ThrowError("JincResizeMT: Error with the TheadPool while getting CPU info!");
+
+		if (threads_number > 1)
+		{
+			if (prefetch > 1)
+			{
+				if (SetAffinity && (prefetch <= poolInterface->GetPhysicalCoreNumber()))
+				{
+					float delta = (float)poolInterface->GetPhysicalCoreNumber() / (float)prefetch, Offset = 0.0f;
+
+					for (uint8_t i = 0; i < prefetch; i++)
+					{
+						if (!poolInterface->AllocateThreads(threads_number, (uint8_t)ceil(Offset), 0, MaxPhysCores,
+							true, true, TabLevel[thread_level], i))
+						{
+							poolInterface->DeAllocateAllThreads(true);
+							env->ThrowError("JincResizeMT: Error with the TheadPool while allocating threadpool!");
+						}
+						Offset += delta;
+					}
+				}
+				else
+				{
+					if (!poolInterface->AllocateThreads(threads_number, 0, 0, MaxPhysCores, false, true, TabLevel[thread_level], -1))
+					{
+						poolInterface->DeAllocateAllThreads(true);
+						env->ThrowError("JincResizeMT: Error with the TheadPool while allocating threadpool!");
+					}
+				}
+			}
+			else
+			{
+				if (!poolInterface->AllocateThreads(threads_number, 0, 0, MaxPhysCores, SetAffinity, true, TabLevel[thread_level], -1))
+				{
+					poolInterface->DeAllocateAllThreads(true);
+					env->ThrowError("JincResizeMT: Error with the TheadPool while allocating threadpool!");
+				}
+			}
+		}
+	}
+
+	const LATTICE_TYPE in_lt = args[19].AsInt(0) == 0 ? LATTICE_CARTESIAN : LATTICE_HEXAGONAL;
+	const LATTICE_TYPE out_lt = args[20].AsInt(0) == 0 ? LATTICE_CARTESIAN : LATTICE_HEXAGONAL;
+
+	return new JincResizeMT(
+		args[0].AsClip(),
+		args[1].AsInt(),  // target_width
+		args[2].AsInt(), // target_height
+		args[3].AsFloat(0.0f), // src_left
+		args[4].AsFloat(0.0f), // src_top
+		args[5].AsFloat(static_cast<float>(vi.width)), // src_width
+		args[6].AsFloat(static_cast<float>(vi.height)), // src_height
+		args[7].AsInt(256), // quant_x
+		args[8].AsInt(256), // quant_y
+		args[9].AsInt(3), // tap
+		args[10].AsFloat(1.0f), // blur
+		args[11].AsString("auto"), // cplace
+		threads_number, // threads
+		args[13].AsInt(-1), // opt
+		args[14].AsInt(0), // initial_capacity
+		args[14].Defined(), // initial_capacity is defined
+		args[15].AsFloat(1.5f), // initial_factor
+		args[16].AsInt(0), // wt
+		false, // lutkernel, currently not supported ? returns error - need check
+		SP_HEXSINC, // kernel_type
+		0.0f,
+		0.0f,
+		0.0f,
+		0.0f,
+		0.0f,
+		args[18].AsBool(false), // FP16
+		args[21].AsInt(1), // range
+		sleep,
+		negativePrefetch,
+		in_lt,
+		out_lt,
+		env);
+}
+
 
 const AVS_Linkage *AVS_linkage = nullptr;
 
@@ -2559,7 +2747,7 @@ extern "C" __declspec(dllexport) const char* __stdcall AvisynthPluginInit3(IScri
 	if (!poolInterface->GetThreadPoolInterfaceStatus()) env->ThrowError("JincResizeMT: Error with the TheadPool status!");
 
     env->AddFunction("JincResizeMT", "c[target_width]i[target_height]i[src_left]f[src_top]f[src_width]f[src_height]f[quant_x]i[quant_y]i[tap]i[blur]f" \
-		"[cplace]s[threads]i[opt]i[initial_capacity]i[initial_factor]f[wt]i[lutkernel]b[FP16]b" \
+		"[cplace]s[threads]i[opt]i[initial_capacity]i[initial_factor]f[wt]i[lutkernel]b[FP16]b[il]i[ol]i" \
 		"[range]i[logicalCores]b[MaxPhysCore]b[SetAffinity]b[sleep]b[prefetch]i[ThreadLevel]i", Create_JincResize, 0);
 	env->AddFunction("Jinc36ResizeMT", "c[target_width]i[target_height]i[src_left]f[src_top]f[src_width]f[src_height]f[quant_x]i[quant_y]i" \
 		"[cplace]s[threads]i[wt]i[lutkernel]b" \
@@ -2578,6 +2766,9 @@ extern "C" __declspec(dllexport) const char* __stdcall AvisynthPluginInit3(IScri
 		"[cplace]s[threads]i[opt]i[k10]f[k20]f[k11]f[k21]f[s]f[FP16]b" \
 		"[range]i[logicalCores]b[MaxPhysCore]b[SetAffinity]b[sleep]b[prefetch]i[ThreadLevel]i", Create_UserDefined4, 0);
 
+	env->AddFunction("HexSincResizeMT", "c[target_width]i[target_height]i[src_left]f[src_top]f[src_width]f[src_height]f[quant_x]i[quant_y]i[tap]i[blur]f" \
+		"[cplace]s[threads]i[opt]i[initial_capacity]i[initial_factor]f[wt]i[lutkernel]b[FP16]b[il]i[ol]i" \
+		"[range]i[logicalCores]b[MaxPhysCore]b[SetAffinity]b[sleep]b[prefetch]i[ThreadLevel]i", Create_HexSincResize, 0);
 
     return JINCRESIZEMT_VERSION;
 }
