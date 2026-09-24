@@ -836,8 +836,8 @@ static bool generate_coeff_table_c(const JincMT_generate_coeff_params &params)
 						else if (params.lattice_in == LATTICE_CARTESIAN && params.lattice_out == LATTICE_HEXAGONAL)
 						{
 							dy = orig_dy * sqrt3_2;
-							if (y % 2 != 0) {
-								dx = orig_dx + 0.5;
+							if ((static_cast<int>(floor(target_y + 0.5)) % 2 != 0)) {
+								dx += 0.5;
 							}
 						}
 						else if (params.lattice_in == LATTICE_HEXAGONAL && params.lattice_out == LATTICE_HEXAGONAL)
