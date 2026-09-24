@@ -1,4 +1,4 @@
-// Avisynth v2.5.  Copyright 2002 Ben Rudiak-Gould et al.
+﻿// Avisynth v2.5.  Copyright 2002 Ben Rudiak-Gould et al.
 // http://www.avisynth.org
 
 // This program is free software; you can redistribute it and/or modify
@@ -666,8 +666,8 @@ static bool generate_coeff_table_c(const JincMT_generate_coeff_params &params)
 	const float k11 = params.k11;
 	const float k21 = params.k21;
 	SP_KERNEL_TYPE kernel_type = params.kernel_type;
-	const double lattice_scaleV = (params.lattice_in == LATTICE_CARTESIAN) ? sqrt(3) / 2 : 1.0;
-	const double lattice_scaleH = (params.lattice_in == LATTICE_CARTESIAN) ? sqrt(3) / 2 : 1.0;
+	const double lattice_scaleV = /*(params.lattice_in == LATTICE_CARTESIAN) ? sqrt(3) / 2 :*/ 1.0;
+	const double lattice_scaleH = /*(params.lattice_in == LATTICE_CARTESIAN) ? sqrt(3) / 2 :*/ 1.0;
 
     const double filter_step_x = min(static_cast<double>(dst_width) / params.crop_width, 1.0);
     const double filter_step_y = min(static_cast<double>(dst_height) / params.crop_height, 1.0);
@@ -799,6 +799,92 @@ static bool generate_coeff_table_c(const JincMT_generate_coeff_params &params)
                 int curr_factor_ptr = tmp_array_top;
                 tmp_array_size = new_size;
 
+				const double sqrt3_2 = 0.8660254037844386; // sqrt(3)/2
+				const double rcp_sqrt3_2 = 1.0 / sqrt3_2; // ~1.1547005383792515
+			
+				for (int ly = 0; ly < filter_size; ++ly)
+				{
+					for (int lx = 0; lx < filter_size; ++lx)
+					{
+						double target_x = is_border ? static_cast<double>(xpos) : static_cast<double>(quantized_xpos);
+						double target_y = is_border ? static_cast<double>(ypos) : static_cast<double>(quantized_ypos);
+
+						target_x = max(min(target_x, static_cast<double>(src_width - 1)), 0.0);
+						target_y = max(min(target_y, static_cast<double>(src_height - 1)), 0.0);
+
+						double orig_dx = (target_x - static_cast<double>(window_x));
+						double orig_dy = (target_y - static_cast<double>(window_y));
+
+						double dx = orig_dx;
+						double dy = orig_dy;
+
+/*						if (params.lattice_in == 0 && params.lattice_out == 0)
+						{							
+							dx = orig_dx;
+							dy = orig_dy;
+						}*/ // original CARTESIAN resize
+
+						if (params.lattice_in == LATTICE_HEXAGONAL && params.lattice_out == LATTICE_CARTESIAN)
+						{
+							dy = orig_dy * rcp_sqrt3_2;
+							if ((window_y % 2 != 0 && window_y >= 0) || (window_y % 2 == 0 && window_y < 0)) {
+								dx = orig_dx - 0.5;
+							}
+						}
+						else if (params.lattice_in == LATTICE_CARTESIAN && params.lattice_out == LATTICE_HEXAGONAL)
+						{
+							dy = orig_dy * sqrt3_2;
+							if (y % 2 != 0) {
+								dx = orig_dx + 0.5;
+							}
+						}
+						else if (params.lattice_in == LATTICE_HEXAGONAL && params.lattice_out == LATTICE_HEXAGONAL)
+						{
+							double src_shift = 0.0;
+							if ((window_y % 2 != 0 && window_y >= 0) || (window_y % 2 == 0 && window_y < 0)) {
+								src_shift = 0.5;
+							}
+
+							double dst_shift = (y % 2 != 0) ? 0.5 : 0.0;
+							dx = orig_dx + (dst_shift - src_shift);
+						}
+
+						dx *= filter_step_x;
+						dy *= filter_step_y;
+
+						float factor;
+
+						switch (kernel_type)
+						{
+						case SP_JINCSINGLE:
+							if (params.bUseLUTkernel)
+							{
+								//int index = static_cast<int>(llround((samples-1)*(dx*dx+dy*dy)/radius2 + DOUBLE_ROUND_MAGIC_NUMBER));
+								const int index = static_cast<int>(llround((samples - 1) * (dx * dx + dy * dy) / radius2));
+								factor = func->GetFactor(index);
+							}
+							else
+								factor = (float)GetFactor2D(dx, dy, radius, params.blur, params.weighting_type);
+							break;
+						case SP_JINCSUM:
+							factor = (float)GetFactor2D_JINCSUM_21(dx, dy, k10, k20, k11, k21, radius2);
+							break;
+						case SP_HEXSINC:
+							factor = (float)GetFactorHexSinc2D(dx, dy, radius, params.blurH * lattice_scaleH, params.blurV * lattice_scaleV, params.weighting_type);
+							break;
+						default: factor = 0.0; break;
+						}
+
+						tmp_array[curr_factor_ptr + static_cast<int64_t>(lx)] = factor;
+						divider += factor;
+						++window_x;
+					}
+					curr_factor_ptr += out->coeff_stride;
+					window_x = window_begin_x;
+					++window_y;
+				}
+
+				/*
                 for (int ly = 0; ly < filter_size; ++ly)
                 {
                     for (int lx = 0; lx < filter_size; ++lx)
@@ -841,6 +927,7 @@ static bool generate_coeff_table_c(const JincMT_generate_coeff_params &params)
                     window_x = window_begin_x;
                     ++window_y;
                 }
+				*/
 
                 // Second loop to divide the coeff
                 curr_factor_ptr = tmp_array_top;
