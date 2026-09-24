@@ -750,10 +750,11 @@ static bool generate_coeff_table_c(const JincMT_generate_coeff_params &params)
             const float quantized_xpos = static_cast<float>(quantized_x_int) / quantize_x;
             const float quantized_ypos = static_cast<float>(quantized_y_int) / quantize_y;
 
-			const int row_parity = (y % 2 == 0) ? 0 : 1;
-			const int map_idx = (row_parity * quantize_y * quantize_x) + (quantized_y_value * quantize_x) + quantized_x_value;
+			const int map_idx = (quantized_y_value * quantize_x) + quantized_x_value;
 
-			if (!is_border && out->factor_map[map_idx] != 0)
+			bool can_use_cache = (!is_border && params.lattice_in == LATTICE_CARTESIAN && params.lattice_out == LATTICE_CARTESIAN);
+
+			if (can_use_cache && out->factor_map[map_idx] != 0)
 			{
 				meta->coeff_meta = out->factor_map[map_idx] - 1;
 			}
@@ -899,7 +900,7 @@ static bool generate_coeff_table_c(const JincMT_generate_coeff_params &params)
                 }
 
                 // Save factor to table
-                if (!is_border)
+                if (!is_border && params.lattice_in == LATTICE_CARTESIAN && params.lattice_out == LATTICE_CARTESIAN)
                     out->factor_map[map_idx] = tmp_array_top + 1;
 
                 meta->coeff_meta = tmp_array_top;
