@@ -622,12 +622,12 @@ static bool init_coeff_table(EWAPixelCoeff *out, int quantize_x, int quantize_y,
 	if (out->meta == nullptr) return(false);
 
     // Alocate factor map
-    out->factor_map = new int[static_cast<int64_t>(quantize_x) * quantize_y];
+    out->factor_map = new int[static_cast<int64_t>(quantize_x) * quantize_y * 2];
 
     // Zeroed memory
     if (out->factor_map == nullptr) return(false);
 
-	memset(out->factor_map,0,static_cast<int64_t>(quantize_x) * quantize_y * sizeof(int));
+	memset(out->factor_map,0,static_cast<int64_t>(quantize_x) * quantize_y * 2 * sizeof(int));
     memset(out->meta,0,static_cast<int64_t>(dst_width) * dst_height * sizeof(EWAPixelCoeffMeta));
 	
 	return(true);
@@ -750,13 +750,15 @@ static bool generate_coeff_table_c(const JincMT_generate_coeff_params &params)
             const float quantized_xpos = static_cast<float>(quantized_x_int) / quantize_x;
             const float quantized_ypos = static_cast<float>(quantized_y_int) / quantize_y;
 
-            if (!is_border && out->factor_map[quantized_y_value * quantize_x + quantized_x_value] != 0)
-            {
-                // Not border pixel and already have coefficient calculated at this quantized position
-                meta->coeff_meta = out->factor_map[quantized_y_value * quantize_x + quantized_x_value] - 1;
-            }
-            else
-            {
+			const int row_parity = (y % 2 == 0) ? 0 : 1;
+			const int map_idx = (row_parity * quantize_y * quantize_x) + (quantized_y_value * quantize_x) + quantized_x_value;
+
+			if (!is_border && out->factor_map[map_idx] != 0)
+			{
+				meta->coeff_meta = out->factor_map[map_idx] - 1;
+			}
+			else
+			{
                 // then need computation
                 float divider = 0.0f;
 
@@ -884,51 +886,6 @@ static bool generate_coeff_table_c(const JincMT_generate_coeff_params &params)
 					++window_y;
 				}
 
-				/*
-                for (int ly = 0; ly < filter_size; ++ly)
-                {
-                    for (int lx = 0; lx < filter_size; ++lx)
-                    {
-                        // Euclidean distance to sampling pixel
-                        const double dx = (clamp(is_border ? xpos : quantized_xpos,0.0f,static_cast<float>(src_width-1))-window_x)*filter_step_x;
-                        const double dy = (clamp(is_border ? ypos : quantized_ypos,0.0f,static_cast<float>(src_height-1))-window_y)*filter_step_y;
-
-						float factor;
-						
-						switch(kernel_type)
-						{
-							case SP_JINCSINGLE :
-								if (params.bUseLUTkernel)
-								{
-									//int index = static_cast<int>(llround((samples-1)*(dx*dx+dy*dy)/radius2 + DOUBLE_ROUND_MAGIC_NUMBER));
-									const int index = static_cast<int>(llround((samples-1)*(dx*dx+dy*dy)/radius2));
-									factor = func->GetFactor(index);
-								}
-								else
-									factor = (float)GetFactor2D(dx,dy,radius,params.blur,params.weighting_type);
-								break;
-							case SP_JINCSUM :
-								factor = (float)GetFactor2D_JINCSUM_21(dx,dy,k10,k20,k11,k21,radius2);
-								break;
-							case SP_HEXSINC:
-								factor = (float)GetFactorHexSinc2D(dx,dy,radius,params.blurH*lattice_scaleH, params.blurV*lattice_scaleV,params.weighting_type);
-								break;
-							default : factor = 0.0; break;
-						}
-
-                        tmp_array[curr_factor_ptr + static_cast<int64_t>(lx)] = factor;
-                        divider += factor;
-
-                        ++window_x;
-                    }
-
-                    curr_factor_ptr += out->coeff_stride;
-
-                    window_x = window_begin_x;
-                    ++window_y;
-                }
-				*/
-
                 // Second loop to divide the coeff
                 curr_factor_ptr = tmp_array_top;
                 for (int ly = 0; ly < filter_size; ++ly)
@@ -943,7 +900,7 @@ static bool generate_coeff_table_c(const JincMT_generate_coeff_params &params)
 
                 // Save factor to table
                 if (!is_border)
-                    out->factor_map[quantized_y_value * quantize_x + quantized_x_value] = tmp_array_top + 1;
+                    out->factor_map[map_idx] = tmp_array_top + 1;
 
                 meta->coeff_meta = tmp_array_top;
                 tmp_array_top += coeff_per_pixel;
